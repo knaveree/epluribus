@@ -51,35 +51,35 @@ class ParamInitializer:
 class Function:
 	def __init__(self, name : str):
 		self.name = name
-	
-	def vectorized_function(self, X, function):
-		output = np.zeros(X.shape[0])
-		for i, x in enumerate(X.T.tolist()[0]):
-			output[i] = function(x)
-		return np.matrix(output).T
 
 class ActivationFunction(Function):
-	prime_switch = {
-		'ReLu' : lambda x : 1 if x > 0 else 0, 
-		'Logistic' : lambda x : (math.e**(-x)) / (1 + math.e**(-x))**2,
-		'Identity' : lambda x : 1}
-	
-	function_switch = {
-		'ReLu' : lambda x : x if x > 0 else 0,
-		'Logistic' : lambda x : 1 / (1 + math.e**(-x)),
-		'Identity' : lambda x : x}
+	switch = {
+		'function' : {
+			'ReLu' :     lambda x : x if x > 0 else 0,
+			'Logistic' : lambda x : 1 / (1 + math.e**(-x)),
+			'Identity' : lambda x : x}, 
+		'prime' : {
+			'ReLu' :     lambda x : 1 if x > 0 else 0, 
+			'Logistic' : lambda x : (math.e**(-x)) / (1 + math.e**(-x))**2,
+			'Identity' : lambda x : 1}}
 
-	def prime(self, X: np.matrix) -> np.matrix:
-		function = self.prime_switch[self.name]
-		return self.vectorized_function(X, function)
+	def vector_activation(self, X, prime_or_func):
+		function = self.switch[prime_or_func][self.name]
+		return np.matrix([function(x) for x in X.T.tolist()[0]]).T
 
-	def function(self, X: np.matrix) -> np.matrix:
-		function = self.function_switch[self.name]
-		return self.vectorized_function(X, function)
+	def prime(self, X: (np.matrix, float, int)) -> (np.matrix, float):
+		if isinstance(X, (float, int)):
+			return self.switch['prime'][self.name](X)	
+		return self.vector_activation(X, 'prime')
 
-	def jacobian(self, unactivated_outputs : np.matrix):
+	def function(self, X: (np.matrix, float, int)) -> (np.matrix, float):
+		if isinstance(X, (float, int)):
+			return self.switch['function'][self.name](X)	
+		return self.vector_activation(X, 'function')
+
+	def jacobian(self, unactivated_outputs : np.matrix) -> np.matrix:
 		X_m_0 = unactivated_outputs.T.tolist()[0]
-		prime = self.prime_switch[self.name]
+		prime = self.switch['prime'][self.name]
 		return np.matrix(np.diag([prime(x) for x in X_m_0]))
 
 class EvaluationFunction(Function):
@@ -98,43 +98,38 @@ class EvaluationFunction(Function):
 				for i in range(Y_hat.shape[0])]).T
 
 class CostFunction(Function):
-	def function(
-		self, 
-		Y : (list, np.matrix),
-		Y_hat : np.matrix):
+	switch = {
+		'function' : {
+			'MeanSquared' : np.square,
+			'MeanAbsolute' : np.abs},
+		'partial' : {
+			'MeanSquared' : lambda x : 2 * x,
+			'MeanAbsolute' : lambda x : 1 if x >= 0 else 1}}
 
-		switch_case = {
-			'MeanSquared' : self.mean_squared,
-			'MeanAbsolute' : self.mean_absolute,
-			'CrossEntropyLoss' : self.cross_entropy}
-		return switch_case[self.name](Y, Y_hat)
+	def function(self, Y : np.matrix, Y_hat : np.matrix) -> np.matrix:
+		error_terms = self.switch['function'][self.name](Y_hat - Y)
+		return np.mean(error_terms.T[0])
 
 	def partial(
 		self, 
-		Y : (list, np.matrix), 
+		Y : np.matrix,
 		Y_hat : np.matrix, 
 		del_var_idx : int) -> float:
 
-		switch_case = {
-			'MeanSquared' : self.mean_squared_partial,
-			'MeanAbsolute' : self.mean_absolute_partial,
-			'CrossEntropyLoss' : self.cross_entropy_partial}
-		return switch_case[self.name](Y, Y_hat, del_var_idx)
+		m = Y.shape[0]; idx = (del_var_idx, 0)
+		x = Y_hat[idx] - Y[idx]
+		return self.switch['partial'][self.name](x) / m
 
-	def mean_squared(self, Y, Y_hat):
-		error_terms = np.square(Y - Y_hat)
-		return np.mean(error_terms.T[0])
-
-	def	mean_squared_partial(self, Y, Y_hat, del_var_idx):
-		m=len(Y.shape[0]); i=del_var_idx,
-		return (Y_hat[i][0] - Y[i][0]) * (2 / m)
-	
-	def gradient(self, Y, Y_hat):
+	def gradient(self, Y : np.matrix, Y_hat : np.matrix):
 		return np.matrix([
 			self.partial(Y, Y_hat, del_var_idx)
-				for del_var_idx in range(len(Y.shape[0]))])
+				for del_var_idx in range(Y.shape[0])])
 
 class Layer:
+	def _check_evaluated(self):
+		if not self.evaluated:
+			raise Exception('Must first call _feedforward method')
+		
 	def _prune(self, pruning_map : dict):
 		for input_idx, output_idx in pruning_map.items():
 			self.w_matrix[input_idx][output_idx] = 0 
@@ -169,7 +164,7 @@ class Layer:
 	def _clear(self):
 		self.input = False 
 		self.output = False 
-		self.XMO = False 
+		self.X_m_0 = False 
 		self.local_jacobian = False 
 		self.bias_updater = False
 		self.weight_updater = False
@@ -192,28 +187,25 @@ class Layer:
 		self.evaluated = True
 		
 	def load_parameter_gradients(self, gradient):
-		if not self.evaluated:
-			raise Exception('Must first call _feedforward method')
-
-		#We are abusing the notation a bit here; the weight and bias
-		#"gradients" should be row vectors but we're reorganizing them
-		#for computational convenience; furthermore they're actually
-		#just slices of a much larger actual gradient rather than gradients
-		#in their own right. You probably don't care but, just sayin'.
-
-		self.weight_gradient = np.matrix(np.zeros(self.m, self.n))
-		self.bias_gradient = np.matrix(np.zeros(self.m, 1))
+		self._check_evaluated()
+		self.weight_gradient = np.matrix(np.zeros((self.m, self.n)))
+		self.bias_gradient = np.matrix(np.zeros((self.m, 1)))
 
 		def gradient_coefficient(i):
-			del_C_del_sigma_i = gradient[0][i] 
-			del_sigma_i_del_Xm0_i = self.activation.prime(self.X_m_0[i][0])
-			return del_C_del_sigma_i * del_C_del_Xm0_i
+			x_i = self.X_m_0[i,0]
+			return gradient[0,i] * self.activation.prime(x_i)
 
 		for i in range(self.m):
 			del_Ci = gradient_coefficient(i)
 			self.weight_gradient[i] = (del_Ci * self.input).T
 			self.bias_gradient[i] = [del_Ci]
-			
+	
+	def _update(self, learn_rate=.05):
+		self._check_evaluated()
+		self.w_matrix -= learn_rate * self.weight_gradient
+		self.b_vector -= learn_rate * self.bias_gradient
+		self._clear()
+		
 class Model:
 	def _vectorize(self, inputs : (list, np.matrix)):
 		if isinstance(inputs, list):
@@ -228,9 +220,6 @@ class Model:
 		else:
 			raise Exception('Invalid input')
 
-	def _reversed_inner_layers(self):
-		return list(reversed(self.inner_layers))
-
 	def _clear(self):
 		self.X, self.Y, self.Y_hat = False, False, False
 		self.prediction = False
@@ -239,24 +228,23 @@ class Model:
 
 	def _update(self, learn_rate=.05):
 		for layer in self.inner_layers:
-			layer.update(learn_rate=learn_rate)
+			layer._update(learn_rate=learn_rate)
 		self._clear()
 
 	def _backpropagate(self):
-		cum_gradient = self.cost.gradient(self.Y, self.Y_hat)
 		self.gradient_history.setdefault(self.epoch,{})[self.step] = []
+		run_gradient = self.cost.gradient(self.Y, self.Y_hat)
 
-		for layer in self.reversed_inner_layers():
-			self.gradient_history[self.epoch][self.step] += [cum_gradient]
-			layer.load_parameter_gradients(cum_gradient)
-			cum_gradient *= layer.local_jacobian
+		for layer in reversed(self.inner_layers):
+			self.gradient_history[self.epoch][self.step] += [run_gradient]
+			layer.load_parameter_gradients(run_gradient)
+			run_gradient *= layer.local_jacobian
 
 	def _feedforward(
 		self, 
 		X: (list, np.matrix), 
 		Y: (list, np.matrix, bool) = False) -> (float, None):
 
-		pdb.set_trace()
 		self.X = self._vectorize(X)
 		if isinstance(Y, (list, np.matrix)):
 			self.Y = self._vectorize(Y)
@@ -275,7 +263,9 @@ class Model:
 	
 	def display_cost(self, direction='train'):
 		plt.figure(figsize=(10, 5))
-		plt.plot(list(range(len(self.runcost))), self.runcost)
+		x = list(self.runcost.keys())
+		y = list(self.runcost.values())
+		plt.plot(x, y)
 
 		plt.xlabel('Step')
 		plt.ylabel('Loss' if direction=='train' else 'Acc')
@@ -315,7 +305,7 @@ class Model:
 		if not len(X_array) == len(Y_array):
 			raise Exception('Mismatched X and Y lengths')
 
-		self.runcost = []
+		self.runcost = {}
 		cumulative_error, total_steps = 0, 0
 
 		for epoch in range(epochs):
@@ -445,10 +435,6 @@ def swrg(seed):
 	return (-.3, .3)
 
 @pytest.fixture
-def input_size():
-	return 784
-
-@pytest.fixture
 def RUInitializer(rwrg):
 	return ParamInitializer(
 		weight_range=rwrg,
@@ -487,40 +473,61 @@ def test_RXInitializer(input_size, RXInitializer):
 	for i in range(20):
 		assert wrg[0] <= RXInitializer.random_weight() <= wrg[1]
 
-@pytest.fixture
-def randx():
-	return [random.normalvariate(0, 10) for i in range(10)]
-
-@pytest.fixture
-def randy():
-	j = random.randint(0,9)
+def random_y(output_size):
+	j = random.randint(0, output_size - 1)
 	return [1 if i == j else 0 for i in range(10)]
 
-@pytest.fixture
-def x_array():
-	return [[random.normalvariate(0, 10) for i in range(10)]
-			for j in range(10)]
+def random_x(input_size, mu=0, sigma=1):
+	return [random.normalvariate(mu, sigma) for i in range(input_size)]
 
 @pytest.fixture
-def y_array():
-	return [[random.normalvariate(0, 10) for i in range(10)]
-			for j in range(10)]
+def input_size():
+	return 784
 
 @pytest.fixture
-def grawp():
+def hidden_layer_sizes():
+	return [256, 128]
+	
+@pytest.fixture
+def output_size():
+	return 10
+
+@pytest.fixture
+def dataset_size():
+	return 1000
+
+@pytest.fixture
+def randx(input_size):
+	return random_x(input_size)
+
+@pytest.fixture
+def randy(output_size):
+	return random_y(output_size)
+
+@pytest.fixture
+def X_data(input_size, dataset_size):
+	return [random_x(input_size) for i in range(dataset_size)]
+
+@pytest.fixture
+def Y_data(output_size, dataset_size):
+	return [random_y(output_size) for i in range(dataset_size)]
+
+@pytest.fixture
+def grawp(input_size, output_size, hidden_layer_sizes):
 	grawp = NeuralNetwork(
-		10,
-		[10],
-		10)
+		input_size,
+		hidden_layer_sizes,
+		output_size)
 	return grawp
 
 def test_predict(grawp, randx, randy):
 	y_hat = grawp.predict(randx)
-	assert y_hat.shape == randy.shape
+	assert y_hat.shape[0] == len(randy)
 
-def test_backpropagate(grawp, x_array, y_array):
-	grawp.train(x_array, y_array, epochs=10, learn_rate=0.5, display=True)
+def test_backpropagate(grawp, X_data, Y_data):
+	grawp.train(X_data, Y_data, epochs=10, learn_rate=0.5, display=False)
 	for X, Y in zip(x_array, y_array):
 		Y_hat = grawp.predict(X) 
-		assert Y_hat != Y
-	
+		pdb.set_trace()
+		Y = np.matrix([Y]).T
+		assert Y_hat.all() != Y.all()
