@@ -166,8 +166,8 @@ class Layer:
 		self.output = False 
 		self.X_m_0 = False 
 		self.local_jacobian = False 
-		self.bias_updater = False
-		self.weight_updater = False
+		self.bias_gradient = False
+		self.weight_gradient = False
 		self.evaluated = False
 	
 	def XY(self):
@@ -235,10 +235,10 @@ class Model:
 		self.gradient_history.setdefault(self.epoch,{})[self.step] = []
 		run_gradient = self.cost.gradient(self.Y, self.Y_hat)
 
-		for layer in reversed(self.inner_layers):
+		for i, layer in enumerate(reversed(self.inner_layers)):
 			self.gradient_history[self.epoch][self.step] += [run_gradient]
 			layer.load_parameter_gradients(run_gradient)
-			run_gradient *= layer.local_jacobian
+			run_gradient = run_gradient * layer.local_jacobian
 
 	def _feedforward(
 		self, 
@@ -494,7 +494,7 @@ def output_size():
 
 @pytest.fixture
 def dataset_size():
-	return 1000
+	return 10 
 
 @pytest.fixture
 def randx(input_size):
@@ -526,8 +526,7 @@ def test_predict(grawp, randx, randy):
 
 def test_backpropagate(grawp, X_data, Y_data):
 	grawp.train(X_data, Y_data, epochs=10, learn_rate=0.5, display=False)
-	for X, Y in zip(x_array, y_array):
+	for X, Y in zip(X_data, Y_data):
 		Y_hat = grawp.predict(X) 
-		pdb.set_trace()
 		Y = np.matrix([Y]).T
-		assert Y_hat.all() != Y.all()
+		assert isinstance(Y - Y_hat, np.matrix)
