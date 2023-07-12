@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import pdb
+import argparse
 
 class ParamInitializer:
 	def __init__(self, 
@@ -525,7 +526,7 @@ def test_predict(grawp, randx, randy):
 	assert y_hat.shape[0] == len(randy)
 
 def test_backpropagate(grawp, X_data, Y_data):
-	grawp.train(X_data, Y_data, epochs=10, learn_rate=0.5, display=False)
+	grawp.train(X_data, Y_data, epochs=10, learn_rate=0.5, display=True)
 	for X, Y in zip(X_data, Y_data):
 		Y_hat = grawp.predict(X) 
 		Y = np.matrix([Y]).T
