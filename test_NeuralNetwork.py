@@ -4,24 +4,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import pdb
-import argparse
+import os
+import pickle
 
 class ParamInitializer:
 	def __init__(self, 
-		weight_range=(-.3, .3),
-		bias_range=(0,0),
-		randomization_method='uniform',
-		input_layer_size=None,
-		preset_package = False):
+		weight_range=[-.3, .3],
+		bias_range=[0,0],
+		randomization_method='normal',
+		input_layer_size=False):
 
 		self.weight_range = weight_range
 		self.method = randomization_method
 		self.bias_range = bias_range
 
 		if randomization_method == 'xavier':
+			if not input_layer_size:
+				raise Exception('xavier method requires specifying input
+					layer size')
 			self.xavierize(input_layer_size)
-		if preset_package:
-			self.__dict__.update(preset_package)
 		
 	def xavierize(self, input_layer_size):
 		n = input_layer_size
@@ -49,9 +50,22 @@ class ParamInitializer:
 		elif self.method == 'normal':
 			return self.normrandom(self.bias_range)
 
+	def pickle(self, name):
+		pass
+
 class Function:
 	def __init__(self, name : str):
 		self.name = name
+
+	def create(self, name: str):
+		switch = {
+			('Identity','ReLu','Logistic') : lambda n: ActivationFunction(n),
+			('onehot', 'identity') : lambda n: EvaluationFunction(n),
+			('MeanSquared', 'MeanAbsolute') : lambda n: CostFunction(n)}
+		for key_tuple, activator in switch:
+			if name in key_tuple:
+				return activator(name)
+		raise Exception('Function name not recognized')
 
 class ActivationFunction(Function):
 	switch = {
@@ -66,37 +80,38 @@ class ActivationFunction(Function):
 
 	def vector_activation(self, X, prime_or_func):
 		function = self.switch[prime_or_func][self.name]
-		return np.matrix([function(x) for x in X.T.tolist()[0]]).T
+		return np.array([function(x) for x in X.T.tolist()[0]]).T
 
-	def prime(self, X: (np.matrix, float, int)) -> (np.matrix, float):
+	def prime(self, X: (np.array, float, int)) -> (np.ndarray, float):
 		if isinstance(X, (float, int)):
 			return self.switch['prime'][self.name](X)	
 		return self.vector_activation(X, 'prime')
 
-	def function(self, X: (np.matrix, float, int)) -> (np.matrix, float):
+	def function(self, X: (np.array, float, int)) -> (np.ndarray, float):
 		if isinstance(X, (float, int)):
 			return self.switch['function'][self.name](X)	
 		return self.vector_activation(X, 'function')
 
-	def jacobian(self, unactivated_outputs : np.matrix) -> np.matrix:
+	def jacobian(self, unactivated_outputs : np.ndarray) -> np.matrix:
 		X_m_0 = unactivated_outputs.T.tolist()[0]
 		prime = self.switch['prime'][self.name]
-		return np.matrix(np.diag([prime(x) for x in X_m_0]))
+		return np.ndarray(np.diag([prime(x) for x in X_m_0]))
 
 class EvaluationFunction(Function):
 	def classify(self, Y_hat):
 		switch_classify = {
-			'OneHot': lambda Y_hat : self.one_hot(Y_hat),
-			'Identity' : lambda Y_hat : Y_hat}
+			'onehot': lambda Y_hat : self.one_hot(Y_hat),
+			'identity' : lambda Y_hat : Y_hat}
 		return switch_classify[self.name](Y_hat)
 		
-	def evaluate(self, Y : np.matrix, Y_hat: np.matrix) -> int:
+	def evaluate(self, Y : np.ndarray, Y_hat: np.matrix) -> int:
 		return int(Y == switch_classify[self.name](Y_hat))
 	
 	def one_hot(self, Y_hat):
-		return np.matrix([
-			1 if i==np.argmax(Y_hat.T[0]) else 0 
-				for i in range(Y_hat.shape[0])]).T
+		Y_hat_as_row = Y_hat.reshape(1,-1)
+		dim = Y_hat_as_row.shape[0]
+		hot_idx = np.argmax(Y_hat_as_row)
+		return np.ndarray([(1 if i==hot_idx else 0) for i in range(dim)]).
 
 class CostFunction(Function):
 	switch = {
@@ -107,22 +122,22 @@ class CostFunction(Function):
 			'MeanSquared' : lambda x : 2 * x,
 			'MeanAbsolute' : lambda x : 1 if x >= 0 else 1}}
 
-	def function(self, Y : np.matrix, Y_hat : np.matrix) -> np.matrix:
+	def function(self, Y : np.ndarray, Y_hat : np.ndarray) -> np.ndarray:
 		error_terms = self.switch['function'][self.name](Y_hat - Y)
 		return np.mean(error_terms.T[0])
 
 	def partial(
 		self, 
-		Y : np.matrix,
-		Y_hat : np.matrix, 
+		Y : np.ndarray,
+		Y_hat : np.ndarray, 
 		del_var_idx : int) -> float:
 
 		m = Y.shape[0]; idx = (del_var_idx, 0)
 		x = Y_hat[idx] - Y[idx]
 		return self.switch['partial'][self.name](x) / m
 
-	def gradient(self, Y : np.matrix, Y_hat : np.matrix):
-		return np.matrix([
+	def gradient(self, Y : np.ndarray, Y_hat : np.ndarray):
+		return np.ndarray([
 			self.partial(Y, Y_hat, del_var_idx)
 				for del_var_idx in range(Y.shape[0])])
 
@@ -131,35 +146,35 @@ class Layer:
 		if not self.evaluated:
 			raise Exception('Must first call _feedforward method')
 		
-	def _prune(self, pruning_map : dict):
-		for input_idx, output_idx in pruning_map.items():
-			self.w_matrix[input_idx][output_idx] = 0 
+#	def _prune(self, pruning_map : dict):
+#		for input_idx, output_idx in pruning_map.items():
+#			self.w_matrix[input_idx][output_idx] = 0 
 
 	def __init__(self, 
 		layer_size : int,
 		prior_layer : int,
-		initializer : ParamInitializer, 
-		pruning_map : (bool, dict) = False,
-		activation = ActivationFunction('ReLu')):
+		model : test_NeuralNetwork.Model):
+		#pruning_map : (bool, dict) = False,
 	
-		self.activation = activation 
-		rand_weight = initializer.random_weight
-		rand_bias = initializer.random_bias
+		self.model = model
+		self.activation = self.model.activation 
+		rand_weight = self.model.initializer.random_weight
+		rand_bias = self.model.initializer.random_bias
 
 		m = self.m = self.size = layer_size
 		n = self.n = self.input_size = prior_layer
 
-		self.b_vector = np.matrix(
+		self.b_vector = np.ndarray(
 			[[initializer.random_bias()] 
 				for i in range(m)])
 
-		self.w_matrix = np.matrix(
+		self.w_matrix = np.ndarray(
 			[[initializer.random_weight() 
 				for j in range(n)]
 					for i in range(m)])
 
-		if pruning_map:
-			self._prune(pruning_map)
+		#if pruning_map:
+			#self._prune(pruning_map)
 		self._clear()
 	
 	def _clear(self):
@@ -167,30 +182,30 @@ class Layer:
 		self.output = False 
 		self.X_m_0 = False 
 		self.local_jacobian = False 
-		self.bias_gradient = False
-		self.weight_gradient = False
+		self.bias_updater = False
+		self.weight_updater = False
 		self.evaluated = False
 	
 	def XY(self):
 		return (self.input, self.output)
 	
-	def unactivated_outputs(self, input_vector: np.matrix) -> np.matrix:
+	def unactivated_outputs(self, input_vector: np.ndarray) -> np.ndarray:
 		W, X_n, B = self.w_matrix, input_vector, self.b_vector
-		X_m_0 = W * X_n + B
+		X_m_0 = W @ X_n + B
 		return X_m_0
 		
-	def _feedforward(self, input_vector: np.matrix) -> np.matrix:
+	def _feedforward(self, input_vector: np.ndarray) -> np.matrix:
 		self.input = input_vector
 		self.X_m_0 = self.unactivated_outputs(self.input)
 		self.output = self.activation.function(self.X_m_0)
 		activation_jacobian = self.activation.jacobian(self.X_m_0)
-		self.local_jacobian = activation_jacobian * self.w_matrix
+		self.local_jacobian = activation_jacobian @ self.w_matrix
 		self.evaluated = True
 		
 	def load_parameter_gradients(self, gradient):
 		self._check_evaluated()
-		self.weight_gradient = np.matrix(np.zeros((self.m, self.n)))
-		self.bias_gradient = np.matrix(np.zeros((self.m, 1)))
+		self.weight_gradient = np.ndarray(np.zeros((self.m, self.n)))
+		self.bias_gradient = np.ndarray(np.zeros((self.m, 1)))
 
 		def gradient_coefficient(i):
 			x_i = self.X_m_0[i,0]
@@ -207,19 +222,68 @@ class Layer:
 		self.b_vector -= learn_rate * self.bias_gradient
 		self._clear()
 		
-class Model:
-	def _vectorize(self, inputs : (list, np.matrix)):
-		if isinstance(inputs, list):
-			return np.matrix(inputs).T	
-		elif isinstance(inputs, np.matrix):
-			if inputs.shape[0] == 1:
-				return inputs.T
-			if inputs.shape[1] == 1:
-				return inputs
-			else:
-				raise Exception('Invalid input')
-		else:
-			raise Exception('Invalid input')
+class Model:	
+	preloads = ['mnist',
+	 'boston_housing',
+	 'fashion_mnist',
+	 'imdb',
+	 'cifar10',
+	 'cifar100',
+	 'reuters']
+
+	def _onehot(y_data : np.ndarray):
+		def onehot_vec(integer, y_rng):
+			output = np.zeroes((1, y_rng))
+			output[integer - 1] = 1
+			return output.reshape(-1, 1)
+		return [onehot_vec(y, y_data.max()) for y in y_data]
+	
+	def _determine_range(vector_list : list):
+		return (global_min, global_max)
+	
+	def _normx(x_data : list):
+		maxim = max(vector_list, key= lambda vector : vector.max()).max()
+		minim = min(vector_list, key= lambda vector : vector.min()).min()
+		normalizer = np.vectorize(lambda x : (x - minim) / (maxim - minim))
+		return [normalizer(vector) for vector in x_data]
+	
+	def _flatten_x(x_data : np.ndarray) -> list:
+		return [x.flatten().reshape(-1,1) for x in x_data]
+	
+	def _preprocess(
+		self, 
+		raw_data:  tuple, 
+		normalize: bool, 
+		classify:  bool) -> list:
+
+		train, test = raw_data 
+
+		x_train = self._flatten_x(train[0])
+		x_test = self._flatten_x(test[0])
+		y_train, y_test = train[1], test[1]
+
+		if normalize: 
+			x_train, x_test = self._normx(x_train), self._normx(x_test)
+		if classify:
+			y_train, y_test = self._onehot(y_train), self._onehot(y_test)
+	
+		current = (x_train, x_test, y_train, y_test)
+		try: 
+			old = (self.x_train, self.x_test, self.y_train, self.y_test)
+			shape_check = lambda data : data[0].shape[0]
+			for curr, old in zip(current, older):
+				if not shape_check(curr) == shape_check(old)
+					raise Exception('Incompatible dimensions for new data')
+
+		except NameError:
+			self.x_train, self.x_test, self.y_train, self.y_test = current
+
+		self.train = (self.x_train, self.y_train)
+		self.test = (self.x_test, self.y_test)
+		self.data = (self.train, self.test)
+
+		self.input_size = self.x_train[0].shape[0] 
+		self.output_size = self.y_train[0].shape[0] 
 
 	def _clear(self):
 		self.X, self.Y, self.Y_hat = False, False, False
@@ -232,26 +296,21 @@ class Model:
 			layer._update(learn_rate=learn_rate)
 		self._clear()
 
-	def _backpropagate(self):
 		self.gradient_history.setdefault(self.epoch,{})[self.step] = []
 		run_gradient = self.cost.gradient(self.Y, self.Y_hat)
 
-		for i, layer in enumerate(reversed(self.inner_layers)):
-			self.gradient_history[self.epoch][self.step] += [run_gradient]
+		step_gradients = [] 
+		for layer in reversed(self.inner_layers):
+			step_gradients += [run_gradient]
 			layer.load_parameter_gradients(run_gradient)
-			run_gradient = run_gradient * layer.local_jacobian
+			run_gradient = run_gradient @ layer.local_jacobian
 
-	def _feedforward(
-		self, 
-		X: (list, np.matrix), 
-		Y: (list, np.matrix, bool) = False) -> (float, None):
+		step_gradients += [None] 
+		#None object corresponds to input layer idx 0
+		step_gradients.reverse()
+		self.gradient_history[self.epoch][self.step] = step_gradients 
 
-		self.X = self._vectorize(X)
-		if isinstance(Y, (list, np.matrix)):
-			self.Y = self._vectorize(Y)
-		else: 
-			self.Y = False
-
+	def _feedforward(self):
 		input_ = self.X
 		for layer in self.inner_layers:
 			layer._feedforward(input_)
@@ -259,17 +318,19 @@ class Model:
 
 		self.Y_hat = self.inner_layers[-1].output
 		self.prediction = self.evaluator.classify(self.Y_hat)
-
+	
+		if self.Y == False:
+			return None
 		return self.cost.function(self.Y, self.Y_hat)
 	
-	def display_cost(self, direction='train'):
+	def display_cost(self, trn_tst='train'):
 		plt.figure(figsize=(10, 5))
 		x = list(self.runcost.keys())
 		y = list(self.runcost.values())
 		plt.plot(x, y)
 
 		plt.xlabel('Step')
-		plt.ylabel('Loss' if direction=='train' else 'Acc')
+		plt.ylabel('Loss' if trn_test=='train' else 'Acc')
 
 		title = {
 			'train' : 'Trailing cost avg at each step of training',
@@ -277,203 +338,176 @@ class Model:
 		plt.title(title[direction])
 		plt.show()
 	
-	def train(
-		self, 
-		X_train : list, 
-		Y_train : list, 
-		epochs : int=10, 
-		learn_rate : float=.05, 
-		display=True):
+	def display_layer_history(self, layer_idx):
+		y = self.query_history(layer_slice = layer_idx)
+		x = list(range(len(y)))
 
-		self._iterate(X_train, Y_train, epochs, learn_rate, display, 'train')
+		plt.figure(figsize=(10, 5))
+		plt.plot(x, y)
+
+		plt.xlabel('Total Step Count')
+		plt.ylabel('Gradient Magnitude')
+
+		title = f'Gradient Magnitude History for Layer {layer_idx}'
+		plt.title(title)
+		plt.show()
+
+	def display_step_history(self, epoch, step):
+		plt.figure(figsize=(10, 5))
+
+		y = self.query_history(epoch_step_slice=(epoch, step))
+		x = list(range(len(y)))
+
+		plt.xlabel('Layer Index')
+		plt.ylabel('Gradient Magnitude')
+
+		plt.title(f'GradMag By Layer At Epoch {epoch} Step {step}')
+		plt.plot(x, y)
+		plt.show()
+
+	def query_history(
+		self, 
+		layer_slice : (bool, int) = False, 
+		epoch_step_slice: (bool, list, tuple) = False):
+
+		if (layer_slice and epoch step_slice):
+			raise Exception('Choose only one kwarg at most')
+		if not self.gradient_history:
+			raise Exception('Network is currently untrained')
+
+		default_output = self.gradient_history 
+		output = default_output
+
+		if layer_slice:
+			output = []
+			for epoch, epoch_dict in self.gradient_history.items():
+				for step, step_gradient_list in epoch_dict.items():
+					layer_gradient = step_gradient_list[layer_slice]
+					output += [np.linalg.norm(layer_gradient)]	
+
+		elif epoch_step_slice:
+			e, s = tuple(epoch_step_slice)
+			output = list(map(np.linalg.norm, self.gradient_history[e][s]))
+
+		return output 
 	
-	def test(
-		self, 
-		X_test : list, 
-		Y_test : list, 
-		display=True):
-
-		self._iterate(X_test, Y_test, 1, .0, display, 'test') 
+	def train(self, epochs : int=10, learn_rate : float=.05, display=True):
+		self._iterate(epochs, learn_rate, display, 'train')
+	
+	def test(self, display=True):
+		self._iterate(1, .0, display, 'test') 
 		
 	def _iterate(self, 
-		X_array : list, 
-		Y_array : list, 
 		epochs : int, 
-		learn_rate : float,
-		display: bool,
-		direction: str):
-
-		if not len(X_array) == len(Y_array):
-			raise Exception('Mismatched X and Y lengths')
+		lrn_rt : float, 
+		disp: bool, 
+		trn_tst: str):
 
 		self.runcost = {}
 		cumulative_error, total_steps = 0, 0
 
+		X_array, Y_array = self.train if trn_tst=='train' else self.test
+
 		for epoch in range(epochs):
 			self.epoch = epoch
 			for step, XY in enumerate(zip(X_array, Y_array)):
-				X, Y = XY
+				self.X, self.Y = XY
 				self.step = step
-				step_loss = self._feedforward(X, Y=Y)
-				if direction == 'train':
+				step_loss = self._feedforward()
+				if trn_tst == 'train':
 					self._backpropagate()
 					self._update()
-				elif direction == 'test':
+				elif trn_test == 'test':
 					step_loss = (self.prediction == self.Y)
-				cumulative_error += step_loss
+				cumulative_value += step_loss
 				total_steps += 1
-				self.runcost[total_steps] = cumulative_error / total_steps
+				self.runcost[total_steps] = cumulative_value / total_steps
 				self._clear()
 
-		if display:
-			self.display_cost(direction=direction)
+		if disp:
+			self.display_cost(trn_test=trn_tst)
 
 	def predict(self, X, clear=True):
-		self._feedforward(X)
+		self.X = X
+		self._feedforward()
 		prediction = self.prediction
 		if clear:
 			self._clear()
 		return prediction
 
-	def query_history(self):
-		if not self.gradient_history:
-			print ('Network is currently untrained')
-		return self.gradient_history
-
-class LinearModel(Model):
-	initializer = ParamInitializer(
-		weight_range = (-1,1),
-		bias_range = (0,0),
-		randomization_method = 'normal')
-
-	hyperparameters = {
-		'initializer' : initializer,
-		'activation' : ActivationFunction('Identity'),
-		'evaluator' : EvaluationFunction('Identity'),
-		'cost' : CostFunction('MeanSquared'),
-		'pruner_list' : False}
-
-	def __init__(self):
-		return None
-
 class NeuralNetwork(Model):
-	initializer = ParamInitializer(
-		weight_range = (-.3,3),
-		bias_range = (0,0),
-		randomization_method = 'uniform')
-
 	hyperparameters = {
-		'initializer' : initializer,
+		'initializer' : ParamInitializer(),
 		'activation' : ActivationFunction('ReLu'),
-		'evaluator' : EvaluationFunction('OneHot'),
-		'cost' : CostFunction('MeanSquared'),
-		'pruner_list' : False}
-
-	def _sanitize_pruner_list(self):
-		if self.pruner_list:
-			warning = 'pruner_list does not match architecture'
-			match = len(self.pruner_list) == len(self.inner_layers)
-
-			if not match:
-				raise Exception(warning)
-
-			for i, pruning_map in enumerate(self.pruner_list): 
-				input_size = self.all_layer_sizes[i]
-				output_size = self.all_layer_sizes[i+1]
-				for i, j in pruning_map.items():
-					if not i < input_size and j < output_size:
-						raise Exception(warning)
-		else:
-			self.pruner_list = [
-				False for layer in self.inner_layer_sizes]
+		'evaluator' : EvaluationFunction('onehot'),
+		'cost' : CostFunction('MeanSquared')}
 
 	def __init__(
 		self,
-		input_size: int,
+		raw_data: tuple,
 		hidden_layer_sizes: list,
-		output_size : int,
+		normalize: bool,
+		classify: bool,
 		**kwargs):
-		
+	
+		self._preprocess(raw_data, normalize, classify)
 		self.hidden_layer_sizes = hidden_layer_sizes
-		self.input_size = input_size
-		self.output_size = output_size
-		self.inner_layer_sizes = hidden_layer_sizes + [output_size]
-		self.all_layer_sizes = [input_size] + self.inner_layer_sizes
+		self.inner_layer_sizes = hidden_layer_sizes + [self.output_size]
+		self.all_layer_sizes = [self.input_size] + self.inner_layer_sizes
 
-		for kwarg in kwargs:
+		for key, value in kwargs.items():
 			if not kwarg in self.hyperparameters:
 				raise Exception('Unrecognized kwarg in __init__')
+			if value == False:
+				kwargs.pop(key)
 		self.hyperparameters.update(kwargs)
 		self.__dict__.update(self.hyperparameters)
-		self._sanitize_pruner_list()
+		#self._sanitize_pruner_list()
 
 		self.inner_layers = []
 		input_size = self.input_size
 		for i, output_size in enumerate(self.inner_layer_sizes):
-			layer = Layer(
-				output_size,
-				input_size,
-				self.initializer,
-				self.pruner_list[i],
-				activation = self.activation)
+			layer = Layer(output_size, input_size, self) #self.pruner_list[i]
 			self.inner_layers += [layer]
 			input_size = output_size
 
 		self.depth = len(self.inner_layers)
 		self.gradient_history = dict()
-	
-@pytest.fixture
-def seed():
-	random.seed(10)
 
-@pytest.fixture
-def rwrg(seed):
-	lb = random.uniform(-1, 0)
-	return (lb, +lb)	
+	def _load_raw_data(self, data_str):
+		if data.endswith('.pkl'):
+			with open(data, 'rb') as file:
+				raw_data = pickle.load(file)
+		elif data in self.preloads:
+			from tensorflow.keras import datasets	
+			raw_data = datasets.__dict__[data].load_data()
+		else:
+			raise Exception('Invalid data call')
+		return raw_data
 
-@pytest.fixture
-def swrg(seed):
-	return (-.3, .3)
-
-@pytest.fixture
-def RUInitializer(rwrg):
-	return ParamInitializer(
-		weight_range=rwrg,
-		randomization_method='uniform')
-
-@pytest.fixture
-def RXInitializer(rwrg, input_size):
-	return ParamInitializer(
-		weight_range=rwrg,
-		randomization_method='xavier',
-		input_layer_size=input_size)
-
-@pytest.fixture
-def RNInitializer(rwrg):
-	return ParamInitializer(
-		weight_range=rwrg,
-		randomization_method='normal')
-
-def test_RUInitializer(rwrg, RUInitializer):
-	for i in range(20):	
-		assert rwrg[0] <= RUInitializer.random_weight() <= rwrg[1]
-		assert RUInitializer.random_bias() == 0
-
-def test_RNInitializer(rwrg, RNInitializer):
-	for i in range(100):	
-		one_std_out = 0
-		if rwrg[0] <= RNInitializer.random_weight() <= rwrg[1]:
-			one_std_out += 1	
-		assert RNInitializer.random_bias() == 0
-	if one_std_out > 50:
-		raise Exception('Either unlikely event happened or we have a problem')
-
-def test_RXInitializer(input_size, RXInitializer):
-	n = input_size
-	wrg = (-math.sqrt(n), math.sqrt(n))
-	for i in range(20):
-		assert wrg[0] <= RXInitializer.random_weight() <= wrg[1]
-
+class ParamPublic(ParamInitializer):
+	def __init__(self, args):
+		a = args
+		super.__init__(
+			weight_range = a.weight_range,
+			bias_range = a.bias_range,
+			randomization_method = a.method,
+			input_layer_size = a.input_layer_size)
+			
+class NeuralPublic(NeuralNetwork):
+	def __init__(self, args):
+		a = args
+		raw_data = self._load_raw_data(a.data)
+		super().__init__(
+			raw_data,
+			a.hidden,
+			a.normalize,
+			a.classify,
+			initializer = a.param_initializer,
+			activation = a.activation,
+			evaluator = a.evaluation,
+			cost = a.cost)
+		
 def random_y(output_size):
 	j = random.randint(0, output_size - 1)
 	return [1 if i == j else 0 for i in range(10)]
@@ -482,52 +516,67 @@ def random_x(input_size, mu=0, sigma=1):
 	return [random.normalvariate(mu, sigma) for i in range(input_size)]
 
 @pytest.fixture
-def input_size():
-	return 784
-
-@pytest.fixture
 def hidden_layer_sizes():
 	return [256, 128]
 	
+def random_img_vector(image_height, image_width):
+	return np.array([[random.randint(0, 255) for i in range(image_width)]
+			for j in range(image_height], dtype=np.uint8])
+
+def random_vector_uniform(input_size, lower=0, upper=1):
+	return [random.uniform(lower, upper) for i in range(input_size)]
+
 @pytest.fixture
-def output_size():
-	return 10
+def image_height():
+	return 28 
+
+@pytest.fixture
+def image_width():
+	return 28
 
 @pytest.fixture
 def dataset_size():
-	return 10 
+	return 100 
 
 @pytest.fixture
-def randx(input_size):
-	return random_x(input_size)
+def input_size(image_height, image_width):
+	return image_height * image_width
 
 @pytest.fixture
-def randy(output_size):
-	return random_y(output_size)
+def output_size():
+	return 10
+	
+@pytest.fixture
+def X_data_random(image_height, image_width, dataset_size):
+	return np.array([random_img_vector(image_height, image_width)
+			for j in range(dataset_size)])
 
 @pytest.fixture
-def X_data(input_size, dataset_size):
-	return [random_x(input_size) for i in range(dataset_size)]
+def Y_data_random(output_size, dataset_size):
+	d_rng = range(dataset_size)
+	return np.array([random.randint(0, output_size-1) for i in d_rng])
+		
+@pytest.fixture
+def mnist_mock(X_data_random, Y_data_random, dataset_size):
+	split = dataset_size // 5
+	X_train, X_test = X_data_random[split:], X_data_random[:split]
+	Y_train, Y_test = Y_data_random[split:], Y_data_random[:split]
+	train = (X_train, Y_train)
+	test = (X_test, Y_test)
+	return (train, test)
 
 @pytest.fixture
-def Y_data(output_size, dataset_size):
-	return [random_y(output_size) for i in range(dataset_size)]
+def grawp(hidden_layer_sizes, mnist_mock):
+	return NeuralNetwork(mnist_mock, hidden_layer_sizes, True, True)
 
-@pytest.fixture
-def grawp(input_size, output_size, hidden_layer_sizes):
-	grawp = NeuralNetwork(
-		input_size,
-		hidden_layer_sizes,
-		output_size)
-	return grawp
+def test_backpropagate(grawp, X_data_random, Y_data_random):
+	grawp.train()
+	for X, Y in zip(X_data_random, Y_data_random):
+		prediction = grawp.predict(X) 
+		pdb.set_trace()
+		Y = np.ndarray([Y]).T
+		assert prediction.all() != Y.all()
+	
+def test_predict(grawp):
+	pass
 
-def test_predict(grawp, randx, randy):
-	y_hat = grawp.predict(randx)
-	assert y_hat.shape[0] == len(randy)
-
-def test_backpropagate(grawp, X_data, Y_data):
-	grawp.train(X_data, Y_data, epochs=10, learn_rate=0.5, display=True)
-	for X, Y in zip(X_data, Y_data):
-		Y_hat = grawp.predict(X) 
-		Y = np.matrix([Y]).T
-		assert isinstance(Y - Y_hat, np.matrix)
