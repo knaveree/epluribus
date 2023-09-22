@@ -9,6 +9,7 @@ stop_words = set(stopwords.words('english'))
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 from sklearn.cluster import KMeans
+from copy import copy
 import pdb
 import datetime as dt
 
@@ -86,16 +87,12 @@ class TestingSentinel:
 		start_dto = self.end_date_dto + dt.timedelta(days=1+start_days)
 		return self.req_by_dto(start_dto, end_dto=end_dto)
 
-testing_sentinel = TestingSentinel()
 class BucketSorter:
-	def __init__(self, start=-1, end=-1, sentinel=testing_sentinel):
-		if not isinstance(start, type(end)):
-			raise Exception('Invalid input date format')
-		self.range_duple = (start, end)
-
-		self._call_sentinel(sentinel=sentinel)
-
+	def __init__(self, formatted_dataframe):
 		self.vectorizer = TfidfVectorizer()
+
+		self.raw_data = formatted_dataframe 
+
 		func = self._preprocess_each_title
 		processed_titles = self.raw_data['title'].apply(func)
 		self.matrix = self.vectorizer.fit_transform(processed_titles)
@@ -104,23 +101,28 @@ class BucketSorter:
 		self.pruned 	=   False
 		self.sorted 	= 	False
 
-	def _call_sentinel(self, sentinel=testing_sentinel):
-		start, end = self.range_duple
-		if isinstance(start, dt.datetime): 
-			self.raw_data = testing_sentinel.req_by_dto(start, end)	
-		elif isinstance(start, int):
-			self.raw_data = testing_sentinel.req_by_days(start, end)	
-
 	def _preprocess_each_title(self, title):
 		words = word_tokenize(title.lower())
 		words = [w for w in words if w.isalpha() and w not in stop_words]
 		return ' '.join(words)			
 
-	def svd(self, n=100, target_variance=.95, override=False): 
+	def normalize(self):
+		column_means = np.mean(self.matrix, axis=0)	
+		self.data_matrix = self.matrix - column_means
+
+	def svd(self, n=100, target_variance=.95, override=False, normalize=False): 
 		t = target_variance
-		self.svd = TruncatedSVD(n_components=n)
-		matrix_reduced = self.svd.fit_transform(self.matrix)
-		v = self.svd.explained_variance_ratio_.sum()
+		self.truncated_svd = TruncatedSVD(n_components=n)
+
+		if normalize:
+			self.normalize()
+			normalized = True
+			matrix = self.data_matrix
+		else:
+			matrix = self.matrix
+
+		matrix_reduced = self.truncated_svd.fit_transform(matrix)
+		v = self.truncated_svd.explained_variance_ratio_.sum()
 		if v < t:
 			if override==True:
 				print(f'Proceeding with variance {v} < target {t}')
@@ -142,79 +144,160 @@ class BucketSorter:
 			max_iter=1000, 
 			random_state=42)
 		kmeans.fit(self.matrix_reduced)
-		self.df_svd_reduced['bucket_id'] = kmeans.labels_
+		self.xor_bucket_series = pd.Series(
+			kmeans.labels_, 
+			index=self.df_svd_reduced.index)
 
-	def prune_records(self, k_records=False, percentile_cutoff=False):
+	def prune_records(self, euclidean_threshold=.9):
 		if self.decomposed == False:
 			raise Exception('Run BucketSorter().svd method before pruning')
-		if not k_records ^ percentile_cutoff:
-			raise Exception('Select k_records xor percentile_cutoff')
 
-		self.df_svd_reduced['EuclideanNorm'] = self.df_svd_reduced.apply(
-			lambda row : np.sum((row.values)**2),
-			axis=1)
-		sorted_df = self.df_svd_reduced.sort_values(by='EuclideanNorm')
+		def passes_threshold(row):
+			return np.sum((row.values)**2) >= euclidean_threshold
 
-		if not percentile_cutoff==False:
-			m_records = len(sorted_df)
-			k_records = ((100 - percentile_cutoff) * m_records) // 100
+		pruning_mask = self.df_svd_reduced.apply(passes_threshold, axis = 1)
+		self.inverted_mask = ~pruning_mask
 
-		self.df_svd_reduced = sorted_df[sorted_df.index < k_records]
+		self.df_svd_reduced = self.df_svd_reduced[pruning_mask]
 		self.matrix_reduced = self.df_svd_reduced.values
 		self.pruned = True
 
 	def sort(
 		self, 
-		num_clusters=10, 
-		svd_n=50, 
-		k_records=False,
-		percentile_cutoff=False,
-		svd_target_var=.95,
-		override_svd=False):
+		num_clusters		=10, 
+		svd_n				=200, 
+		euclidean_threshold	=.9,
+		svd_target_var		=.5,
+		override_svd		=True,
+		normalize			=True):
 
-		self.svd(n=svd_n, target_variance=svd_target_var, override=override_svd)
-		if k_records or percentile_cutoff:	
-			self.prune_records(
-				k_records=k_records, 
-				percentile_cutoff=percentile_cutoff)
+		self.svd(
+			n=svd_n, 
+			target_variance=svd_target_var, 
+			override=override_svd,
+			normalize=normalize)
+		if euclidean_threshold:	
+			self.prune_records(euclidean_threshold=euclidean_threshold)
 		self.k_means(num_clusters)
 		self.sorted = True
 
+	def iterative_sort(self, **kwargs):
+		default_kwargs = {
+			'cycles'				:	 3,      	
+			'num_clusters'			:	 [5, 5, 5],
+			'svd_n'					:	 200, 
+			'euclidean_threshold'	:	 [.9, .75, .5],
+			'svd_target_var'		:	 .5,
+			'override_svd'			:	 True,
+			'normalize'				:	 True}
+
+		default_kwargs.update(kwargs)
+		cycles = default_kwargs['cycles']
+
+		for varname, value in default_kwargs.items():
+			if varname == 'cycles':
+				assert isinstance(value, int)
+			else:
+				try: 
+					iterable = iter(value)
+					length = sum(1 for x in iterable)
+					if not length == cycles:
+						raise Exception('Malformed iterable argument')
+				except:
+					default_kwargs[varname] = [value for i in range(cycles)]
+		iterative_sort_kwargs = default_kwargs
+
+		iterative_sorter = IterativeSorter(copy(self.raw_data))
+		iterative_sorter.iterative_sort(**iterative_sort_kwargs)
+		self.xor_bucket_series = iterative_sorter.xor_bucket_series
+
+		self.sorted=True
+				
 	def extract(self, as_series=False, as_dataframe=False):
+		'''as_series=True returns a pandas Series with the Xor bucket values 
+		matched to each article_id, and includes null values for unassigned 
+		articles. This is intended to be concatenated to a copy of the original 
+		API response.	
+	
+		as_dataframe=True returns a new dataframe and does not include any of 
+		the unsorted entries'''
+
 		if not as_dataframe ^ as_series:
 			raise Exception('Choose as_series or as_dataframe')
-
-		#as_series=True provides the Xor bucket values matched to each
-		#article_id, and includes null values for unassignged articles.
-		#This is intended to be concatenated to a copy of the original 
-		#API response.	
-	
-		#as_dataframe=True provides a new table and does not include any of 
-		#the unsorted entries
 
 		if self.sorted == False:
 			raise Exception('Data has not yet been sorted')
 
-		xor_bucket_series = self.df_svd_reduced['bucket_id']
-		master_idx = self.raw_data.index
-
 		if as_series:
-			return xor_bucket_series.reindex(self.raw_data.index)
+			return self.xor_bucket_series.reindex(self.raw_data.index)
 		if as_dataframe:
 			filtered_raw_data = self.raw_data.loc[
-				self.raw_data.index.isin(xor_bucket_series.index)]
-			filtered_raw_data['bucket_id'] = xor_bucket_series.values
+				self.raw_data.index.isin(self.xor_bucket_series.index)]
+			filtered_raw_data['bucket_id'] = self.xor_bucket_series.values
 			return filtered_raw_data
 
-sorter = BucketSorter(-14, -1)
-sorter.sort(
-	num_clusters=20, 
-	svd_n=25, 
-	k_records=False,
-	percentile_cutoff=10,
-	svd_target_var=.95,
-	override_svd=True)
+class IterativeSorter(BucketSorter):
+	'''Think of these objects as single-use only'''
+	def iterative_sort(self, **kwargs):
+		no_collision_bucket_series = pd.Series(dtype=int)
+		running_bucket_total = 0
+		cycles = kwargs['cycles']
+
+		for cycle in range(cycles):
+			cycle_params = {
+				param_name : iterable_param[cycle] 
+					for param_name, iterable_param in kwargs.items() 
+						if not param_name=='cycles'}
+			try:
+				self.sort(**cycle_params)
+			except ValueError:
+				print('Sorting halted due to low signal')
+				break
+
+			modulus = running_bucket_total + 1
+			no_collision_cycle_series = self.xor_bucket_series + modulus
+
+			number_of_new_buckets = cycle_params['num_clusters']
+			running_bucket_total += number_of_new_buckets
+			
+			no_collision_bucket_series = pd.concat([
+				no_collision_bucket_series, no_collision_cycle_series]) 
+
+			self.inverse_prune()
+
+		self.xor_bucket_series = no_collision_bucket_series
+
+	def inverse_prune(self):
+		self.matrix = self.matrix[self.inverted_mask]
+		self.raw_data = self.raw_data[self.inverted_mask]
+
+		self.decomposed = 	False 
+		self.pruned 	=   False
+		self.sorted 	= 	False
+
+sentinel = TestingSentinel()
+api_response = sentinel.req_by_days(-300, -1)
+sorter = BucketSorter(api_response)
+sort_args = {
+	'num_clusters'			:10, 
+	'svd_n'					:200, 
+	'svd_target_var'		:.50,
+	'euclidean_threshold'	:.9,
+	'override_svd'			:True,
+	'normalize'				:True}
+
+itersort_args = {
+	'cycles'				:4,
+	'num_clusters'			:[5, 5, 5, 5],
+	'svd_n'					:200, 
+	'svd_target_var'		:.50,
+	'euclidean_threshold'	:[.9, .9, .9, .9],
+	'override_svd'			:True,
+	'normalize'				:True}
+
+sorter.iterative_sort(**itersort_args)
+primary_result = sorter.extract(as_dataframe=True)
+
+get = lambda k : primary_result.loc[
+	primary_result['bucket_id']==k, ['bucket_id', 'title']]
 pdb.set_trace()
-sample = result.loc[result['bucket_id'] == 0, ['title', 'bucket_id']]
-result = sorter.extract(as_dataframe=True)
-print(result)
