@@ -13,6 +13,11 @@ from copy import copy
 import pdb
 import datetime as dt
 
+#Explore the natural language processing dimension of this -- Ricky
+#Keywork extraction -- Text Rank
+#I would just look into NLP honestly -- Ricky Mack
+#analyticsteps.com/blogs/top-nlp-algorithms
+
 class TestingSentinel:
 	def foo(self, bar):
 		pass
@@ -103,6 +108,8 @@ class BucketSorter:
 
 	def _preprocess_each_title(self, title):
 		words = word_tokenize(title.lower())
+		#introduce stemming
+		#introduce lemmatization
 		words = [w for w in words if w.isalpha() and w not in stop_words]
 		return ' '.join(words)			
 
@@ -237,7 +244,7 @@ class BucketSorter:
 			return filtered_raw_data
 
 class IterativeSorter(BucketSorter):
-	'''Think of these objects as single-use only'''
+	'''Single use only'''
 	def iterative_sort(self, **kwargs):
 		no_collision_bucket_series = pd.Series(dtype=int)
 		running_bucket_total = 0
@@ -279,7 +286,7 @@ sentinel = TestingSentinel()
 api_response = sentinel.req_by_days(-300, -1)
 sorter = BucketSorter(api_response)
 sort_args = {
-	'num_clusters'			:10, 
+	'num_clusters'			:20, 
 	'svd_n'					:200, 
 	'svd_target_var'		:.50,
 	'euclidean_threshold'	:.9,
