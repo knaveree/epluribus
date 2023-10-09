@@ -14,8 +14,51 @@ nltk.download('wordnet')
 np.random.seed(2018)
 
 class LDAModel:
-	def __init__(self):
-		return None
+	def __init__(self, docs_iterable):
+		self.tfidf_trained = False
+		self.bow_trained = False
+		self.sortables_are_categorized = False
+
+		if not isinstance(self.docs, pd.Series):
+			try: 
+				self.docs = pd.Series(data = list(docs_iterable))
+			except: 
+				raise Exception('Invalid documents format')
+		else:
+			self.docs = docs_iterable
+
+		self.processed_docs = self.docs.map(self.preprocess)
+		self.dictionary = gensim.corpora.Dictionary(self.processed_docs)
+
+	def load_kernel(self, filepath, model_type=False):
+		if not model_type in ('bow', 'tfidf'):
+			raise Exception('Choose bow or tfidf designation for model')
+			
+		with open(os.path.join(os.path.cwd(), filepath), 'rb') as file:
+			model = pickle.load(file)
+
+		if model_type == 'bow':
+			self.bow_trained = True
+			self.bow_model = model
+
+		if model_type == 'tfidf':
+			self.tfidf_trained = True
+			self.tfidf_model = model
+
+	def is_trained(self):
+		return self.bow_trained or self.tfidf_trained
+
+	def lemmatize_stemming(self, text):
+		stemmer = SnowballStemmer('english', ignore_stopwords=False)
+		return stemmer.stem(WordNetLemmatizer().lemmatize(text, pos='v'))
+
+	def preprocess(self, text):
+		result = []
+		for token in gensim.utils.simple_preprocess(text):
+			if (token not in gensim.parsing.preprocessing.STOPWORDS 
+				and len(token) > 3):
+				result.append(lemmatize_stemming(token))
+		return result
 	
 	def train(
 		self, 
@@ -30,12 +73,7 @@ class LDAModel:
 	
 		if not method in ['bow', 'tfidf', 'both']:
 			raise Exception('Choose bow tfidf or both')
-		if not (load_saved==False) ^ (docs_iterable==False):
-			raise Exception('Either train new model or load saved')
 
-		self.docs = list(docs_iterable)
-		self.processed_docs = self.docs.map(self.preprocess)
-		self.dictionary = gensim.corpora.Dictionary(self.processed_docs)
 		self.dictionary.filter_extremes(
 			no_below=no_below, 
 			no_above=no_above, 
@@ -52,6 +90,8 @@ class LDAModel:
 				passes=passes, 
 				workers=workers)
 
+			self.bow_trained = True
+
 		if bow_or_tfidf in ['tfidf', 'both']:
 			self.tfidf = models.TfidfModel(bow_corpus)
 			self.corpus_tfidf = tfidf[bow_corpus]
@@ -63,34 +103,47 @@ class LDAModel:
 				passes=passes, 
 				workers=workers)
 
-	def lemmatize_stemming(self, text):
-		stemmer = SnowballStemmer('english', ignore_stopwords=False)
-		return stemmer.stem(WordNetLemmatizer().lemmatize(text, pos='v'))
+			self.tfidf_trained = True
 
-	def preprocess(self, text):
-		result = []
-		for token in gensim.utils.simple_preprocess(text):
-			if (token not in gensim.parsing.preprocessing.STOPWORDS 
-				and len(token) > 3):
-				result.append(lemmatize_stemming(token))
-		return result
-
-	def bucket_sort(self, sortables_series, model_type='tfidf'):
+	def bucket_sort(self, sortables_series, model_type='bow'):
 		if not isinstance(sortables_series, pd.Series):
 			raise Exception('Input must be valid pandas Series')
 
-		self.sortables_index = sortables_series.index
-		self.processed_sortables = sortable_series.map(self.preprocess)
-		self.sortables_corpus = [self.dictionary.doc2bow(
-			sortable for sortable in self.processed_sortables]
+		if model_type == 'tfidf': 
+			if not self.tfidf_trained:
+				raise Exception('Model not yet trained via tfidf')
+			model = self.tfidf_model
+		elif model_type == 'bow':
+			if not self.bow_trained:
+				raise Exception('Model not yet trained via bow')
+			model = self.bow_model 
+		else:	
+			raise Exception('Model type must be either bow or tfidf')
 
-		model = self.tfidf_model if model_type == 'tfidf' else self.bow_model
+		processed_sortables = sortable_series.map(self.preprocess)
+		tokenized_sortables = [
+			self.dictionary.doc2bow(sortable) 
+				for sortable in processed_sortables]
+		tokenized_series = pd.Series(
+			data = tokenized_sortables,
+			index = sortables_series.index)
 
-		self.topic_distribution = [
-			model.get_document_topics(bow) for bow in self.sortables_corpus]
+		distributions = tokenized_series.map(model.get_document_topics)
 
-		self.sorted = True
+		def get_dominant_topic(distribution)
+			probability = lambda topic : topic[1]
+			most_probable_topic = max(distribution, key = probability)
+			identifier = most_probable_topic[0]
+			return identifier
+
+		self.categorized_sortables_series = distributions.map(
+			get_dominant_topic)
+		self.sortables_are_categorized = True	
 
 	def category_series(self):
-		pass	
+		'''Outputs a Pandas Series with 1 to 1 category assignments assigned
+		to the sample index'''
+		if not self.sortables_are_categorized:
+			raise Exception('First input sortable pd.Series data')
+		return self.categorized_sortables_series
 
