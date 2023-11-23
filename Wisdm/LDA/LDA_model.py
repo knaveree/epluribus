@@ -11,7 +11,6 @@ import nltk
 import pickle
 import os
 nltk.download('wordnet')
-np.random.seed(2018)
 
 class LDAModel:
 	def __init__(self, docs_iterable):
@@ -19,7 +18,7 @@ class LDAModel:
 		self.bow_trained = False
 		self.sortables_are_categorized = False
 
-		if not isinstance(self.docs, pd.Series):
+		if not isinstance(docs_iterable, pd.Series):
 			try: 
 				self.docs = pd.Series(data = list(docs_iterable))
 			except: 
@@ -27,24 +26,35 @@ class LDAModel:
 		else:
 			self.docs = docs_iterable
 
-		self.processed_docs = self.docs.map(self.preprocess)
-		self.dictionary = gensim.corpora.Dictionary(self.processed_docs)
+		self.processed_docs = 	self.autoload( 
+			lambda : self.docs.map(self.preprocess),
+			'processed_docs.pkl')
 
-	def load_kernel(self, filepath, model_type=False):
-		if not model_type in ('bow', 'tfidf'):
-			raise Exception('Choose bow or tfidf designation for model')
-			
-		with open(os.path.join(os.path.cwd(), filepath), 'rb') as file:
-			model = pickle.load(file)
+		self.dictionary = 		self.autoload(
+			lambda : gensim.corpora.Dictionary(self.processed_docs),
+			'dictionary.pkl')
 
-		if model_type == 'bow':
-			self.bow_trained = True
-			self.bow_model = model
+	def autoload(self, obj_generator, filename, rewrite=False, regenerate=False):
+		filepath = os.path.join(os.getcwd(), filename)
+		found = False
 
-		if model_type == 'tfidf':
-			self.tfidf_trained = True
-			self.tfidf_model = model
+		try:
+			with open(filepath, 'rb') as file:
+				obj = pickle.load(filepath)
+			found = True
+		except:
+			pass	
+		
+		if found and not regenerate:
+			return obj
 
+		elif (not found) or rewrite:
+			obj = obj_generator()
+			with open(filepath, 'wb') as file:
+				pickle.dump(obj, file)
+				file.close()
+			return obj
+				
 	def is_trained(self):
 		return self.bow_trained or self.tfidf_trained
 
@@ -57,12 +67,12 @@ class LDAModel:
 		for token in gensim.utils.simple_preprocess(text):
 			if (token not in gensim.parsing.preprocessing.STOPWORDS 
 				and len(token) > 3):
-				result.append(lemmatize_stemming(token))
+				result.append(self.lemmatize_stemming(token))
 		return result
 	
 	def train(
 		self, 
-		docs_iterable, 
+		retrain = False,
 		num_topics = 10,
 		method='bow',
 		no_below = 15,
@@ -79,29 +89,37 @@ class LDAModel:
 			no_above=no_above, 
 			keep_n=keep_n)
 
-		self.bow_corpus = [dictionary.doc2bow(doc) 
+		self.bow_corpus = [self.dictionary.doc2bow(doc) 
 			for doc in self.processed_docs]
 
-		if bow_or_tfidf in ['bow', 'both']:
-			self.bow_model = gensim.models.LdaMulticore(
+		if method in ['bow', 'both']:
+			bow_generator = lambda : gensim.models.LdaMulticore(
 				self.bow_corpus, 
 				num_topics=10, 
 				id2word=self.dictionary, 
 				passes=passes, 
 				workers=workers)
+			self.bow_model = self.autoload(
+				bow_generator,
+				'bow_model.pkl',
+				rewrite=retrain)
 
 			self.bow_trained = True
-
-		if bow_or_tfidf in ['tfidf', 'both']:
+			
+		if method in ['tfidf', 'both']:
 			self.tfidf = models.TfidfModel(bow_corpus)
 			self.corpus_tfidf = tfidf[bow_corpus]
 
-			self.tfidf_model = gensim.models.LdaMulticore(
+			tfidf_generator = lambda : gensim.models.LdaMulticore(
 				self.corpus_tfidf, 
 				num_topics=num_topics, 
-				id2word=dictionary, 
+				id2word=self.dictionary, 
 				passes=passes, 
 				workers=workers)
+			self.tfidf_model = self.autoload(
+				tfidf_generator,
+				'tfidf_model.pkl',
+				rewrite=retrain)
 
 			self.tfidf_trained = True
 
@@ -120,7 +138,7 @@ class LDAModel:
 		else:	
 			raise Exception('Model type must be either bow or tfidf')
 
-		processed_sortables = sortable_series.map(self.preprocess)
+		processed_sortables = sortables_series.map(self.preprocess)
 		tokenized_sortables = [
 			self.dictionary.doc2bow(sortable) 
 				for sortable in processed_sortables]
@@ -130,11 +148,10 @@ class LDAModel:
 
 		distributions = tokenized_series.map(model.get_document_topics)
 
-		def get_dominant_topic(distribution)
+		def get_dominant_topic(distribution):
 			probability = lambda topic : topic[1]
-			most_probable_topic = max(distribution, key = probability)
-			identifier = most_probable_topic[0]
-			return identifier
+			dominant_topic = max(distribution, key = probability)[0]
+			return dominant_topic 
 
 		self.categorized_sortables_series = distributions.map(
 			get_dominant_topic)

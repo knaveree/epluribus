@@ -3,17 +3,14 @@ import datetime as dt
 import os 
 
 class TestingSentinel:
-	def foo(self, bar):
-		pass
-
 	#Simulates some approximation of API response from database in 
 	#the form of a pandas dataframe. The response represents however many
 	#days worth of headlines are requested, based on a date range via
 	#either negative integers counting back from -1 (following reverse
 	#indexing convention) or two python datetime objects.
 
-	def __init__(self, directory='/Users/nathanavery/epluribus/Wisdm/LDA'):
-		source = os.path.join(directory, 'abcnews-date-text.csv')
+	def __init__(self):
+		source = os.path.join(os.getcwd(), 'abcnews-date-text.csv')
 		self.df = pd.read_csv(source)
 		self.end_date_string = '20211231'
 		self.end_date_dto = dt.datetime(year=2021, month=12, day=31)
